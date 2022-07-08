@@ -1,0 +1,614 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: "AWS::Serverless-2016-10-31"
+Description: Automated GuardDuty Security Response
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Description: Source Code GitHub Organization
+    Default: "aws-samples"
+  GitHubRepo:
+    Type: String
+    Description: Source Code GitHub Repository
+    Default: "amazon-guardduty-automated-response-sample"
+
+Globals:
+  Function:
+    CodeUri: src/
+    Environment:
+      Variables:
+        POWERTOOLS_METRICS_NAMESPACE: SecurityOperations
+        LOG_LEVEL: INFO
+    Layers:
+      - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:017000801446:layer:AWSLambdaPowertoolsPython:22"
+    MemorySize: 256 # megabytes
+    Runtime: python3.9
+    Tags:
+      GITHUB_ORG: !Ref GitHubOrg
+      GITHUB_REPO: !Ref GitHubRepo
+    Timeout: 120 # seconds
+
+Resources:
+  EncryptionKey:
+    Type: "AWS::KMS::Key"
+    Properties:
+      Description: Encryption key for security operations resources
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Enable IAM policies"
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: "Allow use of the key"
+            Effect: Allow
+            Principal:
+              AWS:
+                - !GetAtt QuarantineFunctionRole.Arn
+                - !GetAtt QuarantineInstanceRole.Arn
+                - !GetAtt StateMachineRole.Arn
+            Action:
+              - "kms:Encrypt"
+              - "kms:Decrypt"
+              - "kms:ReEncrypt*"
+              - "kms:GenerateDataKey*"
+              - "kms:DescribeKey"
+            Resource: "*"
+          - Sid: "Allow use of the key by CloudWatch Logs"
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.${AWS::URLSuffix}"
+            Action:
+              - "kms:Encrypt*"
+              - "kms:Decrypt*"
+              - "kms:ReEncrypt*"
+              - "kms:GenerateDataKey*"
+              - "kms:Describe*"
+            Resource: "*"
+            Condition:
+              ArnLike:
+                "kms:EncryptionContext:aws:logs:arn": !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+      Tags:
+        - Key: GITHUB_ORG
+          Value: !Ref GitHubOrg
+        - Key: GITHUB_REPO
+          Value: !Ref GitHubRepo
+        - Key: "aws-cloudformation:stack-name"
+          Value: !Ref "AWS::StackName"
+        - Key: "aws-cloudformation:stack-id"
+          Value: !Ref "AWS::StackId"
+        - Key: "aws-cloudformation:logical-id"
+          Value: EncryptionKey
+
+  EncryptionAlias:
+    Type: "AWS::KMS::Alias"
+    Properties:
+      AliasName: "alias/sec_ops"
+      TargetKeyId: !Ref EncryptionKey
+
+  NotificationTopic:
+    Type: "AWS::SNS::Topic"
+    Properties:
+      DisplayName: Security Operations Notifications
+      KmsMasterKeyId: !Ref EncryptionKey
+      Tags:
+        - Key: GITHUB_ORG
+          Value: !Ref GitHubOrg
+        - Key: GITHUB_REPO
+          Value: !Ref GitHubRepo
+
+  ArtifactBucket:
+    Type: "AWS::S3::Bucket"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: "Ignoring access logs"
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              KMSMasterKeyID: !Ref EncryptionKey
+              SSEAlgorithm: "aws:kms"
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionRule
+            NoncurrentVersionTransitions:
+              - StorageClass: INTELLIGENT_TIERING
+                TransitionInDays: 0
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: 0
+                StorageClass: INTELLIGENT_TIERING
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: GITHUB_ORG
+          Value: !Ref GitHubOrg
+        - Key: GITHUB_REPO
+          Value: !Ref GitHubRepo
+      VersioningConfiguration:
+        Status: Enabled
+
+  ArtifactBucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureConnections
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub "${ArtifactBucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": false
+
+  QuarantineFunctionLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+      KmsKeyId: !GetAtt EncryptionKey.Arn
+      LogGroupName: !Sub "/aws/lambda/${QuarantineFunction}"
+      RetentionInDays: 3
+      Tags:
+        - Key: GITHUB_ORG
+          Value: !Ref GitHubOrg
+        - Key: GITHUB_REPO
+          Value: !Ref GitHubRepo
+        - Key: "aws-cloudformation:stack-name"
+          Value: !Ref "AWS::StackName"
+        - Key: "aws-cloudformation:stack-id"
+          Value: !Ref "AWS::StackId"
+        - Key: "aws-cloudformation:logical-id"
+          Value: QuarantineFunctionLogGroup
+
+  QuarantineInstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: !Sub "ec2.${AWS::URLSuffix}"
+          Action: "sts:AssumeRole"
+          Condition:
+            StringEquals:
+              "aws:SourceAccount": !Ref "AWS::AccountId"
+      Description: !Sub "DO NOT DELETE - Used by EC2. Created by CloudFormation ${AWS::StackId}"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      Tags:
+        - Key: "aws-cloudformation:stack-name"
+          Value: !Ref "AWS::StackName"
+        - Key: "aws-cloudformation:stack-id"
+          Value: !Ref "AWS::StackId"
+        - Key: "aws-cloudformation:logical-id"
+          Value: QuarantineInstanceRole
+        - Key: GITHUB_ORG
+          Value: !Ref GitHubOrg
+        - Key: GITHUB_REPO
+          Value: !Ref GitHubRepo
+
+  QuarantineInstancePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: QuarantineInstancePolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: "s3:PutObject"
+            Resource: !Sub "${ArtifactBucket.Arn}/*"
+      Roles:
+        - !Ref QuarantineInstanceRole
+
+  QuarantineInstanceRoleProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Roles:
+        - Ref: QuarantineInstanceRole
+
+  QuarantineFunctionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: !Sub "lambda.${AWS::URLSuffix}"
+          Action: "sts:AssumeRole"
+      Description: !Sub "DO NOT DELETE - Used by Lambda. Created by CloudFormation ${AWS::StackId}"
+      Tags:
+        - Key: "aws-cloudformation:stack-name"
+          Value: !Ref "AWS::StackName"
+        - Key: "aws-cloudformation:stack-id"
+          Value: !Ref "AWS::StackId"
+        - Key: "aws-cloudformation:logical-id"
+          Value: QuarantineFunctionRole
+        - Key: GITHUB_ORG
+          Value: !Ref GitHubOrg
+        - Key: GITHUB_REPO
+          Value: !Ref GitHubRepo
+
+  QuarantineFunctionPolicy:
+    Type: "AWS::IAM::Policy"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W12
+            reason: "Needs permission to modify any resource"
+          - id: W76
+            reason: "Needs broad permissions for quarantining"
+    Properties:
+      PolicyName: QuarantineFunctionPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: "iam:PassRole"
+            Resource:
+              - !GetAtt QuarantineInstanceRole.Arn
+              - !GetAtt SSMPublishRole.Arn
+          - Effect: Allow
+            Action: "s3:PutObject"
+            Resource: !Sub "${ArtifactBucket.Arn}/*"
+          - Effect: Allow
+            Action:
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Resource: !GetAtt QuarantineFunctionLogGroup.Arn
+          - Effect: Allow
+            Action: "sns:Publish"
+            Resource: !Ref NotificationTopic
+          - Effect: Allow
+            Action:
+              - "autoscaling:DescribeAutoScalingInstances"
+              - "ec2:DescribeInstances"
+              - "ec2:GetConsoleScreenshot"
+              - "ec2:DescribeIamInstanceProfileAssociations"
+              - "ec2:DescribeNetworkInterfaces"
+              - "ec2:DescribeSecurityGroups"
+              - "ec2:CreateSecurityGroup"
+              - "ec2:CreateSnapshot"
+              - "ec2:CreateTags"
+              - "ec2:ModifyInstanceAttribute"
+              - "ec2:ModifyNetworkInterfaceAttribute"
+              - "ec2:RevokeSecurityGroupEgress"
+              - "elasticloadbalancing:DescribeLoadBalancers"
+              - "elasticloadbalancing:DescribeInstanceHealth"
+              - "elasticloadbalancing:DescribeTargetGroups"
+              - "elasticloadbalancing:DescribeTargetHealth"
+              - "ssm:DescribeInstanceInformation"
+              - "ssm:ListCommands"
+              - "ssm:GetCommandInvocation"
+              - "ssm:SendCommand"
+            Resource: "*"
+          - Effect: Allow
+            Action: "autoscaling:DetachInstances"
+            Resource: !Sub "arn:${AWS::Partition}:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*"
+          - Effect: Allow
+            Action: "elasticloadbalancing:DeregisterInstancesFromLoadBalancer"
+            Resource: !Sub "arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:loadbalancer/*"
+          - Effect: Allow
+            Action: "elasticloadbalancing:DeregisterTargets"
+            Resource: !Sub "arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:targetgroup/*"
+          - Effect: Allow
+            Action:
+              - "ec2:AssociateIamInstanceProfile"
+              - "ec2:DisassociateIamInstanceProfile"
+            Resource: !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+      Roles:
+        - !Ref QuarantineFunctionRole
+
+  QuarantineFunction:
+    Type: "AWS::Serverless::Function"
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W58
+            reason: "Function has permission to write to CloudWatch Logs"
+          - id: W89
+            reason: "Function does not need VPC resources"
+    Properties:
+      Description: DO NOT DELETE - Security Operations - Quarantine Function
+      Environment:
+        Variables:
+          ARTIFACT_BUCKET: !Ref ArtifactBucket
+          NOTIFICATION_TOPIC_ARN: !Ref NotificationTopic
+          EC2_INSTANCE_PROFILE_ARN: !GetAtt QuarantineInstanceRoleProfile.Arn
+          AWS_ACCOUNT_ID: !Ref "AWS::AccountId"
+          SSM_ROLE_ARN: !GetAtt SSMPublishRole.Arn
+      Handler: quarantine.lambda_handler.handler
+      ReservedConcurrentExecutions: 10
+      Role: !GetAtt QuarantineFunctionRole.Arn
+
+  SSMPublishRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub "ssm.${AWS::URLSuffix}"
+            Action: "sts:AssumeRole"
+      Description: !Sub "DO NOT DELETE - Used by SSM. Created by CloudFormation ${AWS::StackId}"
+      Policies:
+        - PolicyName: SSMPublishPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "sns:Publish"
+                Resource: !Ref NotificationTopic
+      Tags:
+        - Key: "aws-cloudformation:stack-name"
+          Value: !Ref "AWS::StackName"
+        - Key: "aws-cloudformation:stack-id"
+          Value: !Ref "AWS::StackId"
+        - Key: "aws-cloudformation:logical-id"
+          Value: SSMPublishRole
+        - Key: GITHUB_ORG
+          Value: !Ref GitHubOrg
+        - Key: GITHUB_REPO
+          Value: !Ref GitHubRepo
+
+  EventBridgeRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub "events.${AWS::URLSuffix}"
+            Action: "sts:AssumeRole"
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref "AWS::AccountId"
+      Description: !Sub "DO NOT DELETE - Used by EventBridge. Created by CloudFormation ${AWS::StackId}"
+      Policies:
+        - PolicyName: EventBridgePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "states:StartExecution"
+                Resource: !Ref StateMachine
+      Tags:
+        - Key: "aws-cloudformation:stack-name"
+          Value: !Ref "AWS::StackName"
+        - Key: "aws-cloudformation:stack-id"
+          Value: !Ref "AWS::StackId"
+        - Key: "aws-cloudformation:logical-id"
+          Value: EventBridgeRole
+        - Key: GITHUB_ORG
+          Value: !Ref GitHubOrg
+        - Key: GITHUB_REPO
+          Value: !Ref GitHubRepo
+
+  GuardDutyRemediationRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Description: GuardDuty Remediation Rule
+      EventPattern:
+        source:
+          - aws.guardduty
+        detail-type:
+          - GuardDuty Finding
+      State: ENABLED
+      Targets:
+        - Arn: !Ref StateMachine
+          Id: stepfunction-remediation
+          InputPath: "$.detail"
+          RoleArn: !GetAtt EventBridgeRole.Arn
+
+  StateMachineRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub "states.${AWS::URLSuffix}"
+            Action: "sts:AssumeRole"
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Ref "AWS::AccountId"
+      Description: !Sub "DO NOT DELETE - Used by Step Functions. Created by CloudFormation ${AWS::StackId}"
+      Tags:
+        - Key: "aws-cloudformation:stack-name"
+          Value: !Ref "AWS::StackName"
+        - Key: "aws-cloudformation:stack-id"
+          Value: !Ref "AWS::StackId"
+        - Key: "aws-cloudformation:logical-id"
+          Value: StateMachineRole
+        - Key: GITHUB_ORG
+          Value: !Ref GitHubOrg
+        - Key: GITHUB_REPO
+          Value: !Ref GitHubRepo
+
+  StateMachinePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: StateMachinePolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: "iam:PutRolePolicy"
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/*"
+          - Effect: Allow
+            Action: "iam:PutUserPolicy"
+            Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:user/*"
+          - Effect: Allow
+            Action: "s3:PutBucketPublicAccessBlock"
+            Resource: !Sub "arn:${AWS::Partition}:s3:::*"
+            Condition:
+              StringEquals:
+                "s3:ResourceAccount": !Ref "AWS::AccountId"
+          - Effect: Allow
+            Action: "lambda:InvokeFunction"
+            Resource: !GetAtt QuarantineFunction.Arn
+          - Effect: Allow
+            Action: "sns:Publish"
+            Resource: !Ref NotificationTopic
+      Roles:
+        - !Ref StateMachineRole
+
+  StateMachine:
+    Type: "AWS::StepFunctions::StateMachine"
+    Properties:
+      Definition:
+        StartAt: FindingType
+        States:
+          FindingType:
+            Type: Choice
+            Choices:
+              - Variable: "$.resource.resourceType"
+                StringEquals: AccessKey
+                Next: IAMFinding
+              - Variable: "$.resource.resourceType"
+                StringEquals: Instance
+                Next: EC2Finding
+              - Variable: "$.resource.resourceType"
+                StringEquals: S3Bucket
+                Next: S3Finding
+            Default: UnsupportedFinding
+          IAMFinding:
+            Type: Pass
+            Result:
+              PolicyDocument: |-
+                \{
+                  "Version": "2012-10-17",
+                  "Statement": [
+                    \{
+                      "Effect": "Deny",
+                      "Action": "*",
+                      "Resource": "*",
+                      "Condition": \{
+                        "DateLessThan": \{
+                          "aws:TokenIssueTime": "{}"
+                        \}
+                      \}
+                    \}
+                  ]
+                \}
+            ResultPath: "$.Policy"
+            Next: IAMFindingType
+          IAMFindingType:
+            Type: Choice
+            Choices:
+              # https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-user-identity.html#cloudtrail-event-reference-user-identity-fields
+              - Variable: "$.resource.accessKeyDetails.userType"
+                StringEquals: AssumedRole
+                Next: IAMPutRolePolicy
+              - Variable: "$.resource.accessKeyDetails.userType"
+                StringEquals: IAMUser
+                Next: IAMPutUserPolicy
+            Default: UnsupportedIdentityType
+          IAMPutRolePolicy:
+            Type: Task
+            Parameters:
+              "PolicyDocument.$": States.Format($.Policy.PolicyDocument, $.service.eventLastSeen)
+              PolicyName: AWSRevokeOlderSessions
+              "RoleName.$": "$.resource.accessKeyDetails.userName"
+            Resource: "arn:aws:states:::aws-sdk:iam:putRolePolicy"
+            ResultPath: "$.putRolePolicy"
+            Next: IAMFindingPublish
+          IAMPutUserPolicy:
+            Type: Task
+            Parameters:
+              "PolicyDocument.$": States.Format($.Policy.PolicyDocument, $.service.eventLastSeen)
+              PolicyName: AWSRevokeOlderSessions
+              "UserName.$": "$.resource.accessKeyDetails.userName"
+            Resource: "arn:aws:states:::aws-sdk:iam:putUserPolicy"
+            ResultPath: "$.putUserPolicy"
+            Next: IAMFindingPublish
+          IAMFindingPublish:
+            Type: Task
+            Parameters:
+              "Message.$": States.Format('Successfully revoked older sessions on {}', $.resource.accessKeyDetails.userName)
+              TopicArn: !Ref NotificationTopic
+            Resource: "arn:aws:states:::aws-sdk:sns:publish"
+            End: true
+          EC2Finding:
+            Type: Task
+            Resource: !GetAtt QuarantineFunction.Arn
+            Retry:
+              - ErrorEquals:
+                  - Lambda.TooManyRequestsException
+                  - Lambda.ServiceException
+                  - Lambda.AWSLambdaException
+                  - Lambda.SdkClientException
+                IntervalSeconds: 2
+                MaxAttempts: 6
+                BackoffRate: 2
+            TimeoutSeconds: 120
+            End: true
+          S3Finding:
+            Type: Choice
+            Choices:
+              - Variable: "$.resource.s3BucketDetails[0].publicAccess.effectivePermission"
+                StringEquals: PUBLIC
+                Next: S3BlockPublicAccess
+            Default: BucketNotPublic
+          S3BlockPublicAccess:
+            Type: Task
+            Parameters:
+              "Bucket.$": "$.resource.s3BucketDetails[0].name"
+              PublicAccessBlockConfiguration:
+                BlockPublicAcls: true
+                IgnorePublicAcls: true
+                BlockPublicPolicy: true
+                RestrictPublicBuckets: true
+              ExpectedBucketOwner: !Ref "AWS::AccountId"
+            Resource: "arn:aws:states:::aws-sdk:s3:putPublicAccessBlock"
+            ResultPath: "$.putPublicAccessBlock"
+            Next: S3FindingPublish
+          S3FindingPublish:
+            Type: Task
+            Parameters:
+              "Message.$": States.Format('Successfully blocked public access on S3 bucket {}', $.resource.s3BucketDetails[0].name)
+              TopicArn: !Ref NotificationTopic
+            Resource: "arn:aws:states:::aws-sdk:sns:publish"
+            End: true
+          BucketNotPublic:
+            Type: Succeed
+          UnsupportedFinding:
+            Type: Fail
+          UnsupportedIdentityType:
+            Type: Fail
+      RoleArn: !GetAtt StateMachineRole.Arn
+
+Outputs:
+  ArtifactBucket:
+    Description: Security artifact S3 bucket
+    Value: !GetAtt ArtifactBucket.RegionalDomainName
+  NotificationTopic:
+    Description: Security notifications SNS topic
+    Value: !Ref NotificationTopic
+  EncryptionKeyAliasArn:
+    Description: Encryption key alias ARN
+    Value: !Sub "arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:${EncryptionAlias}"

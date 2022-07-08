@@ -1,0 +1,2 @@
+aws-lambda-powertools==1.26.3
+black==22.3.0
