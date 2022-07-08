@@ -4,9 +4,9 @@
 
 This project, when deployed in an AWS account, will break your application if [Amazon GuardDuty](https://aws.amazon.com/guardduty/) detects activity related to running EC2 instances, IAM credentials or S3 buckets. This is by design. Using Amazon GuardDuty, this project will monitor for malicious activity occuring in your account and automatically respond by doing the following:
 
-- If Amazon GuardDuty detects activity on publicly readable S3 buckets, this project will [block public access to S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html)
-- If Amazon GuardDuty detects activity on IAM principles, this project will [revoke any active sessions](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_revoke-sessions.html).
-- If Amazon GuardDuty detects activity on EC2 instances, this project will isolate and quarantine the instance (blocking all traffic to the instance)
+- If Amazon GuardDuty detects malicious activity on publicly readable S3 buckets, this project will [block public access to S3](https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html)
+- If Amazon GuardDuty detects malicious activity on IAM principles, this project will [revoke any active sessions](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_revoke-sessions.html).
+- If Amazon GuardDuty detects malicious activity on EC2 instances, this project will isolate and quarantine the instance (blocking all traffic to the instance)
 
 Amazon GuardDuty is a regional service, so this project will only monitor resources in the AWS region in which it is deployed.
 
