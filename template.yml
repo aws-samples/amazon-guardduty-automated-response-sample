@@ -24,7 +24,7 @@ Globals:
         POWERTOOLS_METRICS_NAMESPACE: SecurityOperations
         LOG_LEVEL: INFO
     Layers:
-      - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:017000801446:layer:AWSLambdaPowertoolsPython:22"
+      - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:017000801446:layer:AWSLambdaPowertoolsPython:36"
     MemorySize: 256 # megabytes
     Runtime: python3.9
     Tags:
@@ -275,6 +275,9 @@ Resources:
           - Effect: Allow
             Action: "s3:PutObject"
             Resource: !Sub "${ArtifactBucket.Arn}/*"
+            Condition:
+              ArnEquals:
+                "lambda:SourceFunctionArn": !GetAtt QuarantineFunction.Arn
           - Effect: Allow
             Action:
               - "logs:CreateLogStream"
