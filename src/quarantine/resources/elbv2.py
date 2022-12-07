@@ -20,6 +20,8 @@ from aws_lambda_powertools import Logger
 import boto3
 import botocore
 
+from quarantine.constants import BOTO3_CONFIG
+
 logger = Logger(child=True)
 
 __all__ = ["ELBv2"]
@@ -27,7 +29,7 @@ __all__ = ["ELBv2"]
 
 class ELBv2:
     def __init__(self, session: boto3.Session) -> None:
-        self.client = session.client("elbv2")
+        self.client = session.client("elbv2", config=BOTO3_CONFIG)
 
     def deregister_target(self, instance_id: str) -> None:
         """

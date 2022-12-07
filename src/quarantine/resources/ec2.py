@@ -27,7 +27,7 @@ from aws_lambda_powertools import Logger
 import boto3
 import botocore
 
-from quarantine.utils import now
+from quarantine.constants import BOTO3_CONFIG
 
 EC2_INSTANCE_PROFILE_ARN = os.environ["EC2_INSTANCE_PROFILE_ARN"]
 
@@ -38,7 +38,7 @@ __all__ = ["EC2"]
 
 class EC2:
     def __init__(self, session: boto3.Session) -> None:
-        self.client = session.client("ec2")
+        self.client = session.client("ec2", config=BOTO3_CONFIG)
 
     def get_console_screenshot(self, instance_id: str) -> str:
         """

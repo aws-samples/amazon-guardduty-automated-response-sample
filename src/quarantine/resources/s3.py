@@ -27,6 +27,7 @@ import boto3
 import botocore
 
 from quarantine.utils import get_prefix
+from quarantine.constants import BOTO3_CONFIG
 
 BUCKET_NAME = os.environ["ARTIFACT_BUCKET"]
 AWS_ACCOUNT_ID = os.environ["AWS_ACCOUNT_ID"]
@@ -38,7 +39,7 @@ __all__ = ["S3"]
 
 class S3:
     def __init__(self, session: boto3.Session) -> None:
-        self.client = session.client("s3")
+        self.client = session.client("s3", config=BOTO3_CONFIG)
 
     def put_object(self, instance_id: str, key: str, body: Union[bytes, str]) -> None:
         prefix = get_prefix(instance_id)

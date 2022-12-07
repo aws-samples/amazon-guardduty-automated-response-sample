@@ -24,7 +24,7 @@ Globals:
         POWERTOOLS_METRICS_NAMESPACE: SecurityOperations
         LOG_LEVEL: INFO
     Layers:
-      - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:017000801446:layer:AWSLambdaPowertoolsPython:36"
+      - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:017000801446:layer:AWSLambdaPowertoolsPythonV2:16"
     MemorySize: 256 # megabytes
     Runtime: python3.9
     Tags:
