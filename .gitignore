@@ -2,4 +2,4 @@
 .venv
 .vscode
 .aws-sam
-*.toml
+samconfig.toml

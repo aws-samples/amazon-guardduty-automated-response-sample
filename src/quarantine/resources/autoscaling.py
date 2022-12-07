@@ -23,6 +23,8 @@ from aws_lambda_powertools import Logger
 import boto3
 import botocore
 
+from quarantine.constants import BOTO3_CONFIG
+
 logger = Logger(child=True)
 
 __all__ = ["AutoScaling"]
@@ -30,7 +32,7 @@ __all__ = ["AutoScaling"]
 
 class AutoScaling:
     def __init__(self, session: boto3.Session) -> None:
-        self.client = session.client("autoscaling")
+        self.client = session.client("autoscaling", config=BOTO3_CONFIG)
 
     def detach_instance(self, instance_id: str) -> None:
         """

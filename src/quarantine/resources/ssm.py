@@ -27,7 +27,7 @@ from aws_lambda_powertools import Logger
 import boto3
 import botocore
 
-from quarantine.constants import SSM_DRAIN_TIME_SECS
+from quarantine.constants import SSM_DRAIN_TIME_SECS, BOTO3_CONFIG
 from quarantine.utils import get_prefix
 
 BUCKET_NAME = os.environ["ARTIFACT_BUCKET"]
@@ -40,7 +40,7 @@ __all__ = ["SSM"]
 
 class SSM:
     def __init__(self, session: boto3.Session) -> None:
-        self.client = session.client("ssm")
+        self.client = session.client("ssm", config=BOTO3_CONFIG)
 
     def describe_instance_information(self, instance_id: str) -> List[Dict[str, Any]]:
         """

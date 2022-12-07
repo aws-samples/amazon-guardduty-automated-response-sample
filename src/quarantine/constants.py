@@ -19,6 +19,21 @@
 * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 """
 
+from botocore.config import Config
+
+__all__ = [
+    "BOTO3_CONFIG",
+    "SSM_COMMANDS",
+    "SSM_DRAIN_TIME_SECS"
+]
+
+BOTO3_CONFIG = Config(
+    retries={
+        "max_attempts": 10,
+        "mode": "standard",
+    }
+)
+
 # Commands to execute on EC2 instances for information gathering
 SSM_COMMANDS = ["uname -a", "whoami", "netstat -ap", "lsof"]
 

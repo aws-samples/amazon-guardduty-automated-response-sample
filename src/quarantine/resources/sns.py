@@ -26,6 +26,7 @@ import boto3
 import botocore
 
 from quarantine.utils import json_dumps
+from quarantine.constants import BOTO3_CONFIG
 
 TOPIC_ARN = os.environ["NOTIFICATION_TOPIC_ARN"]
 
@@ -36,7 +37,7 @@ __all__ = ["SNS"]
 
 class SNS:
     def __init__(self, session: boto3.Session) -> None:
-        self.client = session.client("sns")
+        self.client = session.client("sns", config=BOTO3_CONFIG)
 
     def publish(self, instance_id: str, message: str) -> None:
         params = {
