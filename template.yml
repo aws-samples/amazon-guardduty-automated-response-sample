@@ -24,9 +24,9 @@ Globals:
         POWERTOOLS_METRICS_NAMESPACE: SecurityOperations
         LOG_LEVEL: INFO
     Layers:
-      - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:017000801446:layer:AWSLambdaPowertoolsPythonV2:16"
+      - !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:017000801446:layer:AWSLambdaPowertoolsPythonV2:57"
     MemorySize: 256 # megabytes
-    Runtime: python3.9
+    Runtime: python3.12
     Tags:
       GITHUB_ORG: !Ref GitHubOrg
       GITHUB_REPO: !Ref GitHubRepo
@@ -35,6 +35,8 @@ Globals:
 Resources:
   EncryptionKey:
     Type: "AWS::KMS::Key"
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
     Properties:
       Description: Encryption key for security operations resources
       EnableKeyRotation: true
